@@ -5,6 +5,7 @@ import sys
 from scipy.special import gamma
 import random
 
+#base agent class
 class Agent:
     def __init__(self,e,r0,p=None):
         self.env=e
@@ -64,7 +65,8 @@ class Agent:
 
     def set_policy(self,p):
         self.policy=p
-
+        
+# experimental class for olfactory search with classification of source configuration
 class DiscriminationAgent(Agent):
     def __init__(self,e,r0,p=None,belief_env=None):
         self.env=e
@@ -142,7 +144,7 @@ class DiscriminationAgent(Agent):
         return b
 
 
-
+#deprecated class for basic olfactory search
 class MosquitoAgentOriginal(Agent):
     def __init__(self,e,r0,p=None,belief_env=None):
         self.env=e
@@ -237,6 +239,7 @@ class MosquitoAgentOriginal(Agent):
     def perseus_belief(self,belief):
         return belief
 
+#class for basic olfactory search
 class MosquitoAgent(Agent):
     def __init__(self,e,r0,p=None,belief_env=None):
         super().__init__(e,r0,p)
@@ -320,7 +323,8 @@ class MosquitoAgent(Agent):
         b=np.flip(b)
         b=np.roll(b,(1+self.true_pos[0],1+self.true_pos[1]),axis=(0,1))
         return b
-
+    
+#for TigerGrid problem. hasn't been tested in a while, may be broken
 class TigerAgent(Agent):
     def updateBelief(self,obs):
         super().updateBelief(obs)
@@ -365,7 +369,8 @@ class TigerAgent(Agent):
                 if not (i<4 or (12<=i and i<16)):
                     self.belief[i]=0
         self.belief=self.belief/np.sum(self.belief)
-
+        
+#for Bernoulli bandits. hasn't been tested in a while, may be broken
 class BanditAgent:
     def __init__(self,e,p=None):
         self.env=e
@@ -431,7 +436,8 @@ class BanditAgent:
         self.alphas=alphas
         self.betas=betas
         self.belief=self.get_belief(self.p_grid)
-
+        
+# for Tag. hasn't been tested in a while, may be broken
 class TagAgent:
     def __init__(self,e,p=None):
         self.env=e
