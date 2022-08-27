@@ -4,6 +4,22 @@ from datetime import datetime
 import random
 #scipy.special.cython_special as spec
 
+## an environment class should define, at a minimum:
+## - gamma (float)
+## - numactions (integer)
+## - numobs (integer)
+## - obs (list of possible observations)
+## - actions (list of possible actions)
+## - stepInTime(): allows for dynamic environments, usually trivial
+## - get_g(alpha,action): implements Eq. 10 in Spaan and Vlassis (2005)
+## - getObs(state) 
+## - getReward(state,action)
+##
+## also often implemented:
+## - transition(state,action): yields a new state after the agent takes an action
+## - transition_function(belief,action): returns obs probabilities Pr(o|b,a) and Bayes updates tau(b,a,o). used primarily for backup prioritization
+
+#experimental environment for olfactory search while classifying the source configuration
 class BinaryDiscrimination2D:
     def __init__(self,params):
         self.seed=datetime.now()
@@ -267,7 +283,7 @@ class BinaryDiscrimination2D:
         elif action=="abort":
             return self.rewards[4][self.true_sep,r[0],r[1]]
 
-
+# deprecated
 class SimpleEnv2DOriginal:
     def __init__(self,params):
         self.seed=datetime.now()
@@ -481,7 +497,7 @@ class SimpleEnv2DOriginal:
         elif (action==np.array([0,-1])).all():
             return self.rewards[3][r[0],r[1]]
 
-
+#basic class for olfactory search
 class SimpleEnv2D:
     def __init__(self,params):
         self.seed=datetime.now()
