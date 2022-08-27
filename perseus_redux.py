@@ -34,7 +34,7 @@ class alpha_vec:
     def __eq__(self, other):
          return np.array_equal(self.data,other.data)
 
-
+#Perseus value function class
 class ValueFunction:
     def __init__(self,env,beliefs=None,distances=None,v0=None,a0=None,ordered=False,shaped=False):
         self.env=env
@@ -89,7 +89,7 @@ class ValueFunction:
         #else:
         #    self.shaping=np.zeros((self.env.numactions,))
 
-
+#used for backup prioritization
     def compute_taus_probs(self):
         for b in self.beliefs:
             if b.tau is None:
@@ -102,7 +102,8 @@ class ValueFunction:
                         newtau.append(belief(t))
                     b.tau.append(newtau)
                     b.p_obs.append(p)
-
+                    
+# compute the current estimated value of a belief. usually should be done with parallel=True if multiple cores are available
     def value(self,b,alphaset=None,parallel=False,softmax=False):
         if alphaset==None:
             alphaset=self.alphas
@@ -127,7 +128,8 @@ class ValueFunction:
             if bestalpha is None:
                 raise RuntimeError('best alpha is None')
             return out,bestalpha
-
+        
+#experimental, deprecated
     def initiate_clusters(self,maxdist=15):
         #self.maxdist=self.beliefs[-1].dist
         print("initiating clusters")
@@ -146,7 +148,7 @@ class ValueFunction:
                 b.cluster_probs.append(p)
             i+=1
 
-
+#computes bellman error for prioritization
     def bellmanError(self,b):
         beste=-np.inf
         for a in range(self.env.numactions):
@@ -158,7 +160,8 @@ class ValueFunction:
             if e>beste:
                 beste=e
         return beste-b.value
-
+    
+#used to compute bellman error externally
     def bellmanErrorNew(self,b,value=None):
         newb=belief(b)
         beste=-np.inf
@@ -184,7 +187,8 @@ class ValueFunction:
         else:
             v=value
         return beste-v
-
+    
+# Perseus iteration
     def iterateV(self,parallel=False,verbose=False,v_tol=1e-12,prioritized=False,clusters=False,min_improve=0,boltzmann=False,v_frac_tol=0,pvi=False,max_frac_tol=np.inf):
         errors=[]
         mean_bellman=None
@@ -293,7 +297,7 @@ class ValueFunction:
             self.alphas=newalpha
         newmax=-np.inf
         newmaxb=None
-        
+        #serial backups
         if not parallel:
             self.alphaarray=np.zeros((len(self.alphas),)+self.shape)
             i=0
@@ -318,6 +322,7 @@ class ValueFunction:
                 if not np.array_equal(alf.action,oldalpha.action):
                     Nb+=1
                 i+=1
+        # deprecated 
         elif False:
             alphaarray=np.zeros((len(self.alphas),)+self.shape)
             i=0
@@ -344,7 +349,7 @@ class ValueFunction:
                 newbeliefs.append(boo)
             assert len(self.beliefs)==len(newbeliefs)
             self.beliefs=newbeliefs
-
+   
         else:
             ### parallel value accumulation using njit ###
             array_1=timer()
@@ -423,7 +428,8 @@ class ValueFunction:
                 besta=a
         out=alpha_vec(bestg,self.env.actions[besta],None)
         return out
-
+    
+# run 1 or more Perseus iterations
     def computeOptimal(self,tol=0.001,maxit=None,minit=1,criterion="maxv",minalpha=None,parallel=False,verbose=False,v_tol=1e-12,prioritized=False,clusters=False,min_improve=0,boltzmann=False,v_frac_tol=0,pvi=False,max_frac_tol=np.inf):
         stage=0
         while True:
@@ -455,6 +461,7 @@ class ValueFunction:
                     break
         return backedup,max_bellman,mean_bellman,rms_bellman,error_time,backup_time,bprime_time,array_time,v_update_time
 
+    #experimental, used to prune alpha vectors based on testing
     def prune_unused_alphas(self,threshold=0,fraction=0):
         tally=0
         initial=len(self.alphas)
@@ -513,7 +520,8 @@ class ValueFunction:
             self.changed_beliefs=vf.changed_beliefs
             self.barray=vf.barray
             self.alphaarray=vf.alphaarray
-
+            
+# used to expand belief set
     def add_beliefs(self,beliefs,distances=None):
         i=0
         if self.beliefs is None:
@@ -538,7 +546,8 @@ class ValueFunction:
         for b in self.beliefs:
            self.barray[i,...]=b.data
            i+=1
-
+            
+# experimental, used for changing shaping between iterations
     def shift_value(self,alpha):
         self.alphaarray+=alpha
         g=[self.env.get_g(alpha,action) for action in self.env.actions]
@@ -551,11 +560,11 @@ class ValueFunction:
             b.value=b.value+np.sum(b.data*alpha)
 
 
-
+#i don't remember if this is used for anything
 def check_b(b,alpha,beliefdict):
     if np.sum(b*alpha)<beliefdict[b.tobytes()][0]:
         return b
-#
+
 @njit(parallel=True)
 def get_best_alphas(beliefs,alphas):
     size=beliefs.shape[0]
@@ -573,7 +582,7 @@ def get_best_alphas(beliefs,alphas):
                 bestalpha=alpha
         bestalphas[i,:,:]=bestalpha
     return bestalphas
-#
+
 @njit(parallel=True)
 def parallel_value_numba(beliefs,alphas):
     values  = np.empty(beliefs.shape[0])
