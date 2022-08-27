@@ -11,6 +11,8 @@ from copy import copy
 import os
 from timeit import default_timer as timer
 
+# function for evaluating policy
+
 def policy_trials(ag,env,starts,n_trials,thompson=False,tmax=1000,x0=10,y0=20,errors=False,vf=None,wait=None,no_nn=False,error_frac=0.3333):
     n_starts=len(starts)
     times=np.zeros((n_starts,n_trials))
@@ -104,6 +106,7 @@ def policy_trials(ag,env,starts,n_trials,thompson=False,tmax=1000,x0=10,y0=20,er
     norm_std=np.std(normalized_averages)
     return rewards,times,time_av,reward_av,time_std,reward_std,norm_av,norm_std,failure,bellman,end-start,total_time,error_time
 
+# function for belief collection via exploration
 def generate_beliefs(ag,env,tmax,n_collect,wait=None,x0=None,y0=None,beliefs=None,distances=None,belief_dict=None,close=False,hit_at_first=False,ordered=False,random_walk=0,no_nearest_neighbors=False,test_min=0.0015,test_max=0.004,min_error=None,vf=None):
     if beliefs is None:
         new_beliefs=[]
@@ -232,7 +235,7 @@ def generate_beliefs(ag,env,tmax,n_collect,wait=None,x0=None,y0=None,beliefs=Non
         return new_beliefs,new_belief_dict,distances
     return new_beliefs,new_belief_dict
 
-
+# used to determine if starting location is appropriate
 def in_cone(env,r_ag,r0,tol=1e-3):
     return env.likelihood[r_ag[0]-r0[0],r_ag[1]-r0[1]]>tol
 
@@ -272,12 +275,16 @@ update_shaping_every=np.inf
 
 x0=10
 y0=20
+
+#generally set to 1
 boxscale=float(os.environ.get("BOXSCALE"))
 
 Lx=160*boxscale
 Ly=80*boxscale
 
+#generally set to 1
 gridscale=float(os.environ.get("GRIDSCALE"))
+
 dims=(int(80*gridscale+1),int(40*gridscale+1))
 
 x0=int(x0*gridscale)
@@ -359,6 +366,9 @@ test_max=0.005*rate*dt/0.5
 #
 # beliefs,belief_dict,distances=generate_beliefs(ag,env,tmax,nb,x0=x0,y0=y0,beliefs=beliefs,belief_dict=belief_dict,close=True,distances=distances,ordered=True,random_walk=random_walk,no_nearest_neighbors=no_nn,wait=wait)
 
+
+# first, test a chosen heuristic on the environment
+
 #pol=policy.InfotacticPolicy(ag,poisson=True)
 pol=policy.SpaceAwareInfotaxis(ag)
 #pol=policy.QMDPPolicy(ag)
@@ -396,7 +406,7 @@ infotaxis_std_reward=None
 
 test_infotaxis=True
 if test_infotaxis:
-    print('testing space-aware infotaxis')
+    print('testing space-aware infotaxis') #or whatever policy
     info_rewards_1,info_times_1,infotaxis_av_time_1,infotaxis_av_reward_1,infotaxis_std_time_1,infotaxis_std_reward_1,info_norm_av_1,info_norm_std_1,info_failure_1,errors_1,foo,bar,baz=policy_trials(ag,env,starts,10,tmax=1000,wait=wait,no_nn=no_nn,thompson=thompson)
     if conditioned_trials:
         info_rewards,info_times,infotaxis_av_time,infotaxis_av_reward,infotaxis_std_time,infotaxis_std_reward,info_norm_av,info_norm_std,info_failure,errors,foo,bar,baz=policy_trials(ag,env,starts_2,1000,tmax=1000,wait=wait,no_nn=no_nn,thompson=thompson)
@@ -406,7 +416,9 @@ else:
     infotaxis_std_reward=None
     infotaxis_std_time=None
 
-random.seed(6969)
+random.seed(6969) # for consistency from run to run
+
+#use infotaxis to collect beliefs
 
 pol=policy.InfotacticPolicy(ag,poisson=True)
 #pol.eps=0.1
@@ -454,7 +466,9 @@ tmax=1000
 nb=10000
 max_beliefs=-1
 
+# generally set to zero. allows for epsilon-random search during policy evaluation
 epsilon=float(os.environ.get('EPSILON'))
+
 max_it=np.inf
 from matplotlib import pyplot as plt
 #vf.initiate_clusters()
@@ -476,6 +490,7 @@ array_times=[]
 v_update_times=[]
 save_times=[]
 
+# perform perseus iterations (generally, until the walltime is reached)
 for it in range(n_its_initial):
     start=timer()
     if it==max_it:
@@ -646,6 +661,9 @@ for it in range(n_its_initial):
     end=timer()
     it_time=end-start
     print('iteration done after',it_time)
+    
+    #these can be uncommented for the purpose of benchmarking
+    
     #it_times.append(it_time)
     #trial_times.append(trial_time)
     #action_times.append(action_time)
