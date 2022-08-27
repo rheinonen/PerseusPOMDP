@@ -3,6 +3,8 @@ import numpy as np
 from datetime import datetime
 from scipy.stats import entropy
 
+#at a minimum, a Policy class should implement a getAction(belief) function which returns an action. if i weren't lazy I'd make a template class
+
 class GreedyDiscrimination:
     def __init__(self,ag,r=2,eps=0):
         self.ag=ag
@@ -215,6 +217,8 @@ class ActionVoting:
                 bestaction=a
         return self.agent.env.actions[bestaction]
 
+    
+# greedy policy with respect to a Perseus value function    
 class OptimalPolicy:
     def __init__(self,vf,agent,parallel=False,epsilon=0):
         self.vf=vf
@@ -248,7 +252,8 @@ class GreedyPolicy:
     def getAction(self,belief):
         location = np.unravel_index(np.argmax(belief),belief.shape)
         return random.choice(follow_loc(location,self.agent.true_pos))
-
+    
+#deprecated
 class InfotacticPolicyOriginal:
     def __init__(self,agent):
         self.agent=agent
