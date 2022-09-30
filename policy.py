@@ -352,39 +352,32 @@ class SpaceAwareInfotaxis:
         return best_action
 
 class InfotacticPolicy:
-    def __init__(self,agent,poisson=True):
+    def __init__(self,agent,out_of_bounds_actions=False):
         self.agent=agent
-        self.poisson=poisson
+        self.out_of_bounds_actions=out_of_bounds_actions # defaults to A. Loisy's choice to exclude out-of-bounds actions from consideration
     def getAction(self,belief):
         newS=np.inf
-        #S=entropy(belief)
-        #print("entropy: ",S)
         best_action=None
         for action in self.agent.env.actions:
-            #print(action)
-            newpos=self.agent.belief_env.transition(self.agent.true_pos,action)
-            p=belief[newpos[0],newpos[1]]
-            #print("probability of finding source: ",p)
+            if not self.out_of_bounds_actions:
+                if self.agent.env.outOfBounds(action+self.agent.true_pos):
+                    continue
+            newpos=self.agent.belief_env.transition(self.agent.true_pos,action) #prospective grid location
+            p=belief[newpos[0],newpos[1]] #probability that agent finds the source
+            
             x=newpos[0]-np.arange(self.agent.belief_env.dims[0])
             y=newpos[1]-np.arange(self.agent.belief_env.dims[1])
-            #rates=self.agent.belief_env.get_rate(x[:,None],y[None,:])
-            # if self.poisson:
-            #     h=np.sum(rates*belief)
-            #     l_hit=1-np.exp(-h)
-            # else:
-            l_hit=np.sum(self.agent.belief_env.get_likelihood(x[:,None],y[None,:])*belief)
-            l_miss=1-l_hit-p
-            #print("probability of hit: ",l)
-            s0=entropy(self.agent.computeBelief(False,belief,action).flatten())
-            #print("entropy associated with no hit:",s0)
-            s1=entropy(self.agent.computeBelief(True,belief,action).flatten())
-            #print("entropy associated with hit:",s1)
+          
+            l_hit=np.sum(self.agent.belief_env.get_likelihood(x[:,None],y[None,:])*belief) #prob of hit
+            l_miss=1-l_hit-p #prob of miss
+            
+            s0=entropy(self.agent.computeBelief(False,belief,action).flatten()) #entropy for a miss
+            s1=entropy(self.agent.computeBelief(True,belief,action).flatten()) #entropy for a hit
+            
             tmp=l_miss*s0+l_hit*s1
-            #print("expected DeltaS: ",tmp)
-            if tmp<newS:
+            if tmp+1e-10<newS: #use an epsilon out of deference to A. Loisy
                 newS=tmp
                 best_action=action
-        #print("best action is: ",best_action)
 
         if np.array_equal(best_action,None):
             raise RuntimeError('Failed to find optimal action')
