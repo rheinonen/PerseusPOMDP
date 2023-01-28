@@ -2,8 +2,8 @@ import random
 import numpy as np
 from datetime import datetime
 from scipy.stats import entropy
-
-#at a minimum, a Policy class should implement a getAction(belief) function which returns an action. if i weren't lazy I'd make a template class
+import math
+from timeit import default_timer as timer
 
 class GreedyDiscrimination:
     def __init__(self,ag,r=2,eps=0):
@@ -22,6 +22,25 @@ class GreedyDiscrimination:
         belief_pos = np.unravel_index(np.argmax(b),b.shape)
         action=random.choice(follow_loc(belief_pos,self.ag.true_pos))
         return self.ag.env.array_to_str(action)
+
+
+#class ValueModelPolicy:
+   # def __init__(self,model_dir,inputshape=(197,65)):
+       # model_name = os.path.basename(model_dir)
+      #  weights_path = os.path.abspath(os.path.join(model_dir, model_name))
+      #  config_path = os.path.abspath(os.path.join(model_dir, model_name + ".config"))
+      #  with open(config_path, 'rb') as filehandle:
+      #      config = pickle.load(filehandle)
+      #  if "discount" not in config:
+      #      config["discount"] = 1.0
+      #  if "shaping" not in config:
+      #      config["shaping"] = "0"
+      #  model = valuemodel.ValueModel(**config)
+      #  model.build_graph(input_shape_nobatch=inputshape)
+      #  model.load_weights(weights_path)
+     #   self.model=model
+    #def getAction(self,belief):
+
 
 class InfotacticDiscrimination:
     def __init__(self,ag,r=2,eps=0):
@@ -217,8 +236,6 @@ class ActionVoting:
                 bestaction=a
         return self.agent.env.actions[bestaction]
 
-    
-# greedy policy with respect to a Perseus value function    
 class OptimalPolicy:
     def __init__(self,vf,agent,parallel=False,epsilon=0):
         self.vf=vf
@@ -232,6 +249,32 @@ class OptimalPolicy:
             return random.choice(self.agent.env.actions)
         b=self.agent.perseus_belief(belief) # this line for situations where belief used by perseus is defined differently
         value,bestalpha=self.vf.value(b,parallel=self.parallel)
+        if self.set_used:
+            bestalpha.used=True
+        self.last_value=value
+        return bestalpha.action
+
+class OptimalPolicyWithCorr:
+    def __init__(self,vf0,vf1,agent,parallel=False,epsilon=0):
+        self.vf0=vf0
+        self.vf1=vf1
+        self.agent=agent
+        self.parallel=parallel
+        self.set_used=False
+        self.epsilon=epsilon
+        self.last_value=None
+    def getAction(self,belief):
+        if random.random()<self.epsilon:
+            return random.choice(self.agent.env.actions)
+        b=self.agent.perseus_belief(belief) # this line for situations where belief used by perseus is defined differently
+        if self.agent.last_obs is None:
+            raise RuntimeError('agent has undefined observational state!')
+        elif self.agent.last_obs==0:
+            value,bestalpha=self.vf0.value(b,parallel=self.parallel)
+        elif self.agent.last_obs==1:
+            value,bestalpha=self.vf1.value(b,parallel=self.parallel)
+        else:
+            raise RuntimeError('agent has unrecognized observational state!')
         if self.set_used:
             bestalpha.used=True
         self.last_value=value
@@ -252,8 +295,7 @@ class GreedyPolicy:
     def getAction(self,belief):
         location = np.unravel_index(np.argmax(belief),belief.shape)
         return random.choice(follow_loc(location,self.agent.true_pos))
-    
-#deprecated
+
 class InfotacticPolicyOriginal:
     def __init__(self,agent):
         self.agent=agent
@@ -287,7 +329,7 @@ class InfotacticPolicyOriginal:
             print("entropy associated with hit:",s1)
             tmp=p*(-S)+(1-p)*((1-l)*(s0-S)+l*(s1-S))
             print("expected DeltaS: ",tmp)
-            if tmp<deltaS:
+            if tmp+1e-10<deltaS:
                 deltaS=tmp
                 best_action=action
         print("best action is: ",best_action)
@@ -297,11 +339,12 @@ class InfotacticPolicyOriginal:
         return best_action
 
 class SpaceAwareInfotaxis:
-    def __init__(self,agent,epsilon=0,type=0):
+    def __init__(self,agent,epsilon=0,out_of_bounds_actions=False,with_corr=False):
         self.agent=agent
         self.epsilon=epsilon
-        self.type=type
-
+        #self.type=type
+        self.out_of_bounds_actions=out_of_bounds_actions
+        self.with_corr=with_corr
     def getAction(self,belief):
         if np.random.random()<self.epsilon:
             return np.random.choice(self.ag.env.actions)
@@ -312,37 +355,36 @@ class SpaceAwareInfotaxis:
 
         for action in self.agent.env.actions:
             #print(action)
+            if not self.out_of_bounds_actions:
+                if self.agent.env.outOfBounds(self.agent.true_pos+action):
+                    continue
             newpos=self.agent.belief_env.transition(self.agent.true_pos,action)
-            p=belief[newpos[0],newpos[1]]
+            ps=belief[newpos[0],newpos[1]]
             #print("probability of finding source: ",p)
             x=newpos[0]-np.arange(self.agent.belief_env.dims[0])
             y=newpos[1]-np.arange(self.agent.belief_env.dims[1])
-            #rates=self.agent.belief_env.get_rate(x[:,None],y[None,:])
-            # if self.poisson:
-            #     h=np.sum(rates*belief)
-            #     l_hit=1-np.exp(-h)
-            # else:
-            l_hit=np.sum(self.agent.belief_env.get_likelihood(x[:,None],y[None,:])*belief)
-            l_miss=1-l_hit-p
-            #print("probability of hit: ",l)
-            x=np.arange(self.agent.belief_env.dims[0])
-            y=np.arange(self.agent.belief_env.dims[1])
-            dist=np.abs(newpos[0]-x[:,None])+np.abs(newpos[1]-y[None,:])
-            self.dist=np.zeros(self.agent.belief_env.dims)
-            b0=self.agent.computeBelief(False,belief,action)
-            b1=self.agent.computeBelief(True,belief,action)
-            if self.type==0:
-                J0=np.log2(max([2**(entropy(b0.flatten(),base=2)-1)-0.5+np.sum(dist*b0),1]))
-                J1=np.log2(max([2**(entropy(b1.flatten(),base=2)-1)-0.5+np.sum(dist*b1),1]))
-            elif self.type==1:
-                J0=np.log2(2**(entropy(b0.flatten(),base=2)-1)+0.5+np.sum(dist*b0))
-                J1=np.log2(2**(entropy(b1.flatten(),base=2)-1)+0.5+np.sum(dist*b1))
-            else:
-                raise RuntimeError("invalid policy subtype")
-            #print("entropy associated with hit:",s1)
-            tmp=l_miss*J0+l_hit*J1
+            probs=[]
+            for i in range(0,self.agent.belief_env.obs[-1]):
+                if self.with_corr:
+                    p=self.agent.belief_env.get_likelihood(x[:,None],y[None,:],i,self.agent.last_obs,action)*belief
+                else:
+                    p=self.agent.belief_env.get_likelihood(x[:,None],y[None,:],i)*belief
+                probs.append(np.sum(p))
+            probs.append(1-sum(probs)-ps)
+            dist=np.abs(x[:,None])+np.abs(y[None,:])
+            js=[]
+            for i in range(self.agent.belief_env.obs[-1]+1):
+                if self.with_corr:
+                    b=self.agent.computeBelief(i,action,belief,action=action)
+                else:
+                    b=self.agent.computeBelief(i,belief,action=action)
+                s=entropy(b.flatten(),base=2)
+                j=np.log2(2**(s-1)+0.5+np.sum(dist*b))
+                js.append(j)
+
+            tmp=np.sum(np.multiply(js,probs))
             #print("expected DeltaS: ",tmp)
-            if tmp<newJ:
+            if tmp+1e-10<newJ:
                 newJ=tmp
                 best_action=action
         #print("best action is: ",best_action)
@@ -352,36 +394,59 @@ class SpaceAwareInfotaxis:
         return best_action
 
 class InfotacticPolicy:
-    def __init__(self,agent,out_of_bounds_actions=False):
+    def __init__(self,agent,verbose=False,poisson=True,epsilon=0,out_of_bounds_actions=False):
         self.agent=agent
-        self.out_of_bounds_actions=out_of_bounds_actions # defaults to A. Loisy's choice to exclude out-of-bounds actions from consideration
+        self.poisson=poisson
+        self.epsilon=epsilon
+        self.verbose=verbose
+        self.out_of_bounds_actions=out_of_bounds_actions
     def getAction(self,belief):
+        if random.random() < self.epsilon:
+            return random.choice(ag.env.actions)
         newS=np.inf
-        best_action=None
+        #S=entropy(belief)
+        #print("entropy: ",S)
+        best_action=[]
         for action in self.agent.env.actions:
+            if self.verbose:
+                print('action',action)
             if not self.out_of_bounds_actions:
-                if self.agent.env.outOfBounds(action+self.agent.true_pos):
+                if self.agent.env.outOfBounds(self.agent.true_pos+action):
+                    if self.verbose:
+                        print('out of bounds')
                     continue
-            newpos=self.agent.belief_env.transition(self.agent.true_pos,action) #prospective grid location
-            p=belief[newpos[0],newpos[1]] #probability that agent finds the source
-            
+            newpos=self.agent.belief_env.transition(self.agent.true_pos,action)
+            ps=belief[newpos[0],newpos[1]]
+            #print("probability of finding source: ",p)
             x=newpos[0]-np.arange(self.agent.belief_env.dims[0])
             y=newpos[1]-np.arange(self.agent.belief_env.dims[1])
-          
-            l_hit=np.sum(self.agent.belief_env.get_likelihood(x[:,None],y[None,:])*belief) #prob of hit
-            l_miss=1-l_hit-p #prob of miss
-            
-            s0=entropy(self.agent.computeBelief(False,belief,action).flatten()) #entropy for a miss
-            s1=entropy(self.agent.computeBelief(True,belief,action).flatten()) #entropy for a hit
-            
-            tmp=l_miss*s0+l_hit*s1
-            if tmp+1e-10<newS: #use an epsilon out of deference to A. Loisy
+            probs=[]
+            for i in range(0,self.agent.belief_env.obs[-1]):
+                p=self.agent.belief_env.get_likelihood(x[:,None],y[None,:],i)*belief
+                probs.append(np.sum(p))
+            probs.append(1-sum(probs)-ps)
+            entropies=[]
+            for i in range(self.agent.belief_env.obs[-1]+1):
+                s=entropy(self.agent.computeBelief(i,belief,action).flatten())
+                entropies.append(s)
+            tmp=np.sum(np.multiply(entropies,probs))
+            #s0=entropy(self.agent.computeBelief(False,belief,action).flatten())
+            #print("entropy associated with no hit:",s0)
+            #s1=entropy(self.agent.computeBelief(True,belief,action).flatten())
+            #print("entropy associated with hit:",s1)
+            #tmp=l_miss*s0+l_hit*s1
+            if self.verbose:
+                print("expected entropy: ",tmp)
+            if tmp<newS:
                 newS=tmp
-                best_action=action
+                best_action=[action]
+            elif tmp==newS:
+                best_action.append(action)
+        #print("best action is: ",best_action)
 
-        if np.array_equal(best_action,None):
+        if best_action is None:
             raise RuntimeError('Failed to find optimal action')
-        return best_action
+        return random.choice(best_action)
 
 # def entropy(belief,base=None):
 #     return np.sum(entr(belief,base=base))
