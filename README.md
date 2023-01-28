@@ -30,3 +30,5 @@ Perseus is implemented in perseus_redux.py. The basic object is a ValueFunction,
 ## Usage
 Two examples of usage are given in main.py, used to construct policies in an isotropic environment with multiple possible detections, and main_windy.py, used to construct policies in a windy environment with one possible detection.
 
+##POMDP files
+A few 2D search problems have also been included as .pomdp files, using Tony Cassandra's format. These problems are benchmarked in Loisy and Heinonen (2023). 
