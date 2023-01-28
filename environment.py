@@ -5,6 +5,286 @@ import random
 import math
 #scipy.special.cython_special as spec
 
+class SimpleEnv2D: ### MAIN ENV CLASS FOR 2D OLFACTORY SEARCH
+    def __init__(self,params):
+        self.seed=datetime.now()
+        random.seed(self.seed)
+        self.t=0
+        self.dims=params["dims"] # number of (x,y) gridpoints. Ny should be odd
+        self.Lx=params["Lx"] #downwind box size
+        self.Ly=params["Ly"] #crosswind box size
+        self.dx=self.Lx/(self.dims[0]-1)
+        self.dy=self.Ly/(self.dims[1]-1)
+        self.x0=params["x0"] #integer downwind position of source relative to lefthand boundary
+        self.xarr=np.linspace(0,self.Lx,self.dims[0])
+        self.yarr=np.linspace(0,self.Ly,self.dims[1])
+        self.D=params["D"] #turbulent diffusivity
+        self.agent_size=params["agent_size"]
+        self.tau=params["tau"] #particle lifetime
+        self.V=params["V"] #mean flow speed
+        self.R=params["R"] #emission rate
+        self.dt=params["dt"] #time step
+        self.actions=[np.array([-1,0]),np.array([1,0]),np.array([0,-1]),np.array([0,1])]
+        self.numobs=params['max_detections']+2
+        self.obs=[i for i in range(-1,params['max_detections']+1)]
+        self.gamma=params["gamma"] #discount rate
+        self.numactions=4
+        penalty=params["exit_penalty"]
+        self.easy_likelihood=params["easy_likelihood"]
+        self.Uoverv=params["Uoverv"]
+        self.agent=None
+        self.y0=params['y0']
+        self.pos=np.array([self.x0,self.y0])
+        time_reward=params['time_reward']
+        self.shaped=False
+        if "2d" in params:
+            self.twod=params["2d"]
+        else:
+            self.twod=False
+        #if self.twod:
+        #    import scipy.special.cython_special as spec
+        self.shaping_factor=params["shaping_factor"]
+        if self.shaping_factor=="q":
+            self.shaped=True
+        elif self.shaping_factor>0:
+            self.shaped=True
+        self.shaping_power=params["shaping_power"]
+        self.entropy_factor=params["entropy_factor"]
+        if self.entropy_factor>0:
+            self.shaped=True
+
+
+
+        dist=np.zeros((2*self.dims[0]-1,2*self.dims[1]-1))
+        for i in range(-(self.dims[0]-1),self.dims[0]):
+            for j in range(-(self.dims[1]-1),self.dims[1]):
+                dist[i,j]=np.abs(i)+np.abs(j)
+        #if time_reward:
+        #    self.qvalue=-dist
+        #else:
+        #    self.qvalue=self.gamma**dist
+
+        self.dist=dist
+        self.likelihood=[]
+        x=np.arange(-self.dims[0]+1,self.dims[0])
+        y=np.arange(-self.dims[1]+1,self.dims[1])
+        x=x[:,None]
+        y=y[None,:]
+        for i in range(self.obs[-1]+1):
+            l=self.compute_likelihood(x,y,i)
+            assert(l[self.dims[0]-1,self.dims[1]-1]==0)
+            self.likelihood.append(l)
+
+        shaping=np.zeros((self.numactions,2*self.dims[0]-1,2*self.dims[1]-1))
+        shapefunc=None
+        if self.shaped:
+            if self.shaping_factor=="q":
+                shapefunc=1/self.gamma-self.gamma**(self.dist-1)
+            elif self.shaping_power==0:
+                shapefunc=np.log(1+self.dist)
+            else:
+                shapefunc=self.shaping_factor*self.dist**self.shaping_power
+            if self.entropy_factor>0:
+                shapefunc=shapefunc+self.entropy_factor*(self.likelihood*np.log(self.likelihood,out=np.zeros_like(self.likelihood),where=self.likelihood!=0)+(1-self.likelihood)*np.log(1-self.likelihood,out=np.zeros_like(self.likelihood),where=self.likelihood!=1))
+        self.shapefunc=shapefunc
+
+        if self.shaped:
+            for a in range(self.numactions):
+                action=self.actions[a]
+                shaping[a,:,:]=self.gamma*np.roll(shapefunc,tuple(-action),axis=(0,1))
+                shaping[a,0,0]=self.gamma*shapefunc[0,0]
+            shaping=shapefunc[None,:,:]-shaping
+        self.shaping=shaping
+
+        if not time_reward:
+            self.reward0=np.zeros((2*self.dims[0]-1,2*self.dims[1]-1))
+            self.reward1=np.zeros((2*self.dims[0]-1,2*self.dims[1]-1))
+            self.reward2=np.zeros((2*self.dims[0]-1,2*self.dims[1]-1))
+            self.reward3=np.zeros((2*self.dims[0]-1,2*self.dims[1]-1))
+            self.reward4=np.zeros((2*self.dims[0]-1,2*self.dims[1]-1))
+
+
+            self.reward1[1,0]=1
+            self.reward2[-1,0]=1
+            self.reward3[0,1]=1
+            self.reward4[0,-1]=1
+
+            self.reward0[self.dims[0]-self.x0:self.dims[0],:]=-penalty
+            self.reward1[self.dims[0]-1-self.x0:self.dims[0],:]=-penalty
+
+            self.reward0[-(self.dims[0]):-self.x0,:]=-penalty
+            self.reward2[-(self.dims[0]-1):-self.x0+1,:]=-penalty
+
+            self.reward0[:,self.dims[1]-self.y0:self.dims[1]]=-penalty
+            self.reward3[:,self.dims[1]-self.y0-1:self.dims[1]]=-penalty
+
+            self.reward0[:,-(self.dims[1]):-self.y0]=-penalty
+            self.reward4[:,-(self.dims[1]-1):-self.y0+1]=-penalty
+            self.rewards=[self.reward1+shaping[0,:,:],self.reward2+shaping[1,:,:],self.reward3+shaping[2,:,:],self.reward4+shaping[3,:,:]]
+        else:
+            rew=-1*np.ones((2*self.dims[0]-1,2*self.dims[1]-1))
+            rew[0,0]=0
+            self.rewards=[rew,rew,rew,rew,rew]
+
+    def change_shaping_factor(self,new_factor,vf):
+        shaping=np.zeros((self.numactions,2*self.dims[0]-1,2*self.dims[1]-1))
+        vf.shift_value((new_factor-self.shaping_factor)*self.shapefunc)
+        self.shaping_factor=new_factor
+        for a in range(self.numactions):
+            action=self.actions[a]
+            tmp0=np.roll(self.likelihood*self.shapefunc,tuple(-action),axis=(0,1))
+            tmp0[-action[0],-action[1]]=0
+            tmp0[0,0]=0
+            p=1-self.likelihood
+            p[0,0]=0
+            tmp1=np.roll(p*self.shapefunc,tuple(-action),axis=(0,1))
+            tmp1[-action[0],-action[1]]=0
+            tmp1[0,0]=0
+            shaping[a,:,:]=self.gamma*(tmp0+tmp1)
+        shaping=self.shapefunc[None,:,:]-shaping
+        shaping=shaping*self.shaping_factor
+        self.rewards=[self.reward1+shaping[0,:,:],self.reward2+shaping[1,:,:],self.reward3+shaping[2,:,:],self.reward4+shaping[3,:,:]]
+
+
+    def stepInTime(self):
+        self.t+=1
+
+    def reset(self):
+        self.t=0
+
+    def set_pos(self,x0,y0):
+        self.x0=x0
+        self.y0=y0
+
+    def set_agent(self,agent):
+        self.agent=agent
+
+
+    def get_likelihood(self,x,y,n):
+        return self.likelihood[n][x+self.dims[0]-1,y+self.dims[1]-1]
+
+    def compute_likelihood(self,x,y,n):
+        if self.twod:
+            r=np.sqrt((self.dx*x)**2+(self.dy*y)**2)
+            r1=r+(r==0)
+            ell=np.sqrt(self.D*self.tau/(1+self.V**2*self.tau/(4*self.D)))
+            tmp=sc.kn(0,r1/ell)
+            tmp*=self.R*self.dt/np.log(ell/self.agent_size)*np.exp(self.dx*x*self.V/2/self.D)
+            if n==self.obs[-1]:
+                out =0
+                for i in range(self.obs[-1]):
+                    out=out+np.exp(-tmp)*tmp**i/math.factorial(i)
+                return (1-out)*(r>0)
+            else:
+                return np.exp(-tmp)*tmp**n/math.factorial(n)*(r>0)
+        if self.easy_likelihood:
+            if isinstance(x,int):
+                x=np.array([x],dtype='float64')
+                y=np.array([y],dtype='float64')
+            else:
+                x=x.astype('float64')
+                y=y.astype('float64')
+            return 1/np.cosh(self.dy*self.Uoverv/self.dx*y*np.divide(np.ones_like(x),x,out=np.zeros_like(x),where=x!=0))**2*(x>0)
+        r=np.sqrt((self.dx*x)**2+(self.dy*y)**2)
+        r1=r+(r==0)
+        tmp=self.dt*self.agent_size*self.R/r1
+        tmp*=np.exp(-r1/np.sqrt(self.D*self.tau/(1+self.V**2*self.tau/(4*self.D))))
+        tmp*=np.exp(self.dx*x*self.V/(2*self.D))
+        if n==self.obs[-1]:
+            out=0
+            for i in range(self.obs[-1]):
+                out=out+np.exp(-tmp)*tmp**i/math.factorial(i)
+            return (1-out)*(r>0)
+        else:
+            return np.exp(-tmp)*tmp**n/math.factorial(n)*(r>0)
+
+    def get_rate(self,x,y):
+        if self.twod:
+            r=np.sqrt((self.dx*x)**2+(self.dy*y)**2)
+            r1=r+(r==0)
+            ell=np.sqrt(self.D*self.tau/(1+self.V**2*self.tau/(4*self.D)))
+            tmp=sc.kn(0,r1/ell)
+            tmp*=self.R/np.log(ell/self.agent_size)*np.exp(self.dx*x*self.V/2/self.D)
+            return tmp*(r>0)
+
+        r=np.sqrt((self.dx*x)**2+(self.dy*y)**2)
+        tmp=np.divide(self.dt*self.agent_size*self.R, r, out=np.zeros_like(r), where=r!=0)
+        tmp*=np.exp(-r/np.sqrt(self.D*self.tau/(1+self.V**2*self.tau/(4*self.D))))
+        tmp*=np.exp(self.dx*x*self.V/(2*self.D))
+        return tmp
+
+    def transition_function(self,belief,action):
+        b=np.roll(belief,tuple(action),axis=(0,1))
+        if np.array_equal(action,[1,0]):
+            tsrc=belief[0,0]+belief[-1,0]
+        elif np.array_equal(action,[-1,0]):
+            tsrc=belief[0,0]+belief[1,0]
+        elif np.array_equal(action,[0,1]):
+            tsrc=belief[0,0]+belief[0,-1]
+        elif np.array_equal(action,[0,-1]):
+            tsrc=belief[0,0]+belief[0,1]
+        else:
+            raise RuntimeError("not a valid action")
+        tsrc_out=np.zeros_like(b)
+        tsrc_out[0,0]=1
+
+        ps=[]
+        taus=[]
+        ps.append(tsrc)
+        taus.append(tsrc_out)
+
+        for obs in range(self.numobs-1):
+            tmp=np.roll(self.likelihood[obs],(self.dims[0],self.dims[1]),axis=(0,1))*b
+            tmp[0,0]=0
+            ps.append(np.sum(tmp))
+            taus.append(tmp/np.sum(tmp))
+        return ps,taus
+
+    def get_g(self,alpha,action): #first element associated with detection, second non-detection
+        out=[]
+        g_src=np.zeros_like(alpha)
+        g_src[0,0]=alpha[0,0]
+        g_src[-action[0],-action[1]]=alpha[0,0]
+        out.append(g_src)
+        for obs in range(self.numobs-1):
+            g=alpha*np.roll(self.likelihood[obs],(self.dims[0],self.dims[1]),axis=(0,1))
+            g=np.roll(g,tuple(-action),axis=(0,1))
+            g[0,0]=0
+            g[-action[0],-action[1]]=0
+            out.append(g.copy())
+        return out
+
+    def getObs(self,pos):
+        n=np.random.poisson(self.get_rate(pos[0]-self.x0,pos[1]-self.y0))
+        if n>self.obs[-1]:
+            n=self.obs[-1]
+        #print(x,l)
+        return n
+
+    def transition(self,pos,action):
+        tmp=pos+action
+        if not self.outOfBounds(tmp):
+            return tmp # agent is unmoved if attempts to leave simulation bounds
+        return pos
+
+    def outOfBounds(self,pos):
+        if (pos[0]<0 or pos[0]>self.dims[0]-1 or pos[1] < 0 or pos[1] > self.dims[1]-1):
+            return True
+        return False
+
+    def getReward(self,true_pos,action):
+        r=true_pos-self.pos
+        # if (action==np.array([0,0])).all():
+        #     return self.rewards[0][r[0],r[1]]
+        if (action==np.array([1,0])).all():
+            return self.rewards[0][r[0],r[1]]
+        elif (action==np.array([-1,0])).all():
+            return self.rewards[1][r[0],r[1]]
+        elif (action==np.array([0,1])).all():
+            return self.rewards[2][r[0],r[1]]
+        elif (action==np.array([0,-1])).all():
+            return self.rewards[3][r[0],r[1]]
+
 class BinaryDiscrimination2D:
     def __init__(self,params):
         self.seed=datetime.now()
@@ -267,542 +547,6 @@ class BinaryDiscrimination2D:
             return self.rewards[3][self.true_sep,r[0],r[1]]
         elif action=="abort":
             return self.rewards[4][self.true_sep,r[0],r[1]]
-
-
-class SimpleEnv2DOriginal:
-    def __init__(self,params):
-        self.seed=datetime.now()
-        random.seed(self.seed)
-        self.t=0
-        self.dims=params["dims"] # number of (x,y) gridpoints. Ny should be odd
-        self.Lx=params["Lx"] #downwind box size
-        self.Ly=params["Ly"] #crosswind box size
-        self.dx=self.Lx/(self.dims[0]-1)
-        self.dy=self.Ly/(self.dims[1]-1)
-        self.x0=params["x0"] #integer downwind position of source relative to lefthand boundary
-        self.xarr=np.linspace(0,self.Lx,self.dims[0])
-        self.yarr=np.linspace(0,self.Ly,self.dims[1])
-        self.D=params["D"] #turbulent diffusivity
-        self.agent_size=params["agent_size"]
-        self.tau=params["tau"] #particle lifetime
-        self.V=params["V"] #mean flow speed
-        self.R=params["R"] #emission rate
-        self.dt=params["dt"] #time step
-        self.actions=[np.array([1,0]),np.array([-1,0]),np.array([0,1]),np.array([0,-1])]
-        self.numobs=2
-        self.obs=[False,True]
-        self.gamma=params["gamma"] #discount rate
-        self.numactions=4
-        penalty=params["exit_penalty"]
-        self.agent=None
-        self.y0=params['y0']
-        self.pos=np.array([self.x0,self.y0])
-        time_reward=params['time_reward']
-
-
-        dist=np.zeros((2*self.dims[0]-1,2*self.dims[1]-1))
-        for i in range(-(self.dims[0]-1),self.dims[0]):
-                for j in range(-(self.dims[1]-1),self.dims[1]):
-                    dist[i,j]=np.abs(i)+np.abs(j)
-        if time_reward:
-            self.qvalue=-dist
-        else:
-            self.qvalue=self.gamma**dist
-
-        # need to compute likelihood function on all r1-r2 within simulation box. order is r-r0
-        self.likelihood=np.zeros(self.dims)
-        for i in range(0,self.dims[0]):
-                for j in range(0,self.dims[1]):
-                    #self.likelihood[i,j]=1/np.cosh(np.abs(self.yarr[j])/self.xarr[i]/self.intens)**2*sc.exp1(self.intens**2*self.xarr[i]**2/self.c0)
-                    r=np.sqrt((self.dx*(i-self.x0))**2+(self.dy*(j-self.y0))**2)
-                    if r!=0:
-                        tmp=self.dt*self.agent_size*self.R/r
-                        tmp*=np.exp(-r/np.sqrt(self.D*self.tau/(1+self.V**2*self.tau/(4*self.D))))
-                        tmp*=np.exp(self.dx*(i-self.x0)*self.V/(2*self.D))
-                        self.likelihood[i,j]=1-np.exp(-tmp)
-                    else:
-                        self.likelihood[i,j]=0 # critical: likelihood of being at source is zero (unless the mosquito found it)
-        if not time_reward:
-            reward0=np.zeros(self.dims)
-            reward1=np.zeros(self.dims)
-            reward2=np.zeros(self.dims)
-            reward3=np.zeros(self.dims)
-            reward4=np.zeros(self.dims)
-            #reward0[self.x0,self.y0]=100
-            # if self.x0>0:
-            #     reward1[self.x0-1,self.y0]=1
-            # reward2[self.x0+1,self.y0]=1
-            # reward3[self.x0,self.y0-1]=1
-            # reward4[self.x0,self.y0+1]=1
-            # reward1[-1,:]=-r #penalize leaving the area
-            # reward2[0,:]=-r
-            # reward3[:,-1]=-r
-            # reward4[:,0]=-r
-            # self.rewards=[reward0,reward1,reward2,reward3,reward4]
-
-            reward1[self.x0-1,self.y0]=1
-            reward2[self.x0+1,self.y0]=1
-            reward3[self.x0,self.y0-1]=1
-            reward4[self.x0,self.y0+1]=1
-
-            # reward0[self.dims[0]-self.x0:self.dims[0],:]=-penalty
-            # reward1[self.dims[0]-1-self.x0:self.dims[0],:]=-penalty
-            #
-            # reward0[-(self.dims[0]):-self.x0,:]=-penalty
-            # reward2[-(self.dims[0]-1):-self.x0+1,:]=-penalty
-            #
-            # reward0[:,self.dims[1]-self.y0:self.dims[1]]=-penalty
-            # reward3[:,self.dims[1]-self.y0-1:self.dims[1]]=-penalty
-            #
-            # reward0[:,-(self.dims[1]):-self.y0]=-penalty
-            # reward4[:,-(self.dims[1]-1):-self.y0+1]=-penalty
-            self.rewards=[reward1,reward2,reward3,reward4]
-        else:
-            rew=-1*np.ones(self.dims)
-            rew[self.x0,self.y0]=0
-            self.rewards=[rew,rew,rew,rew,rew]
-
-    def stepInTime(self):
-        self.t+=1
-
-    def reset(self):
-        self.t=0
-
-    def set_pos(self,x0,y0):
-        self.x0=x0
-        self.y0=y0
-
-    def set_agent(self,agent):
-        self.agent=agent
-
-    def get_likelihood(self,x,y):
-        r=np.sqrt((self.dx*x)**2+(self.dy*y)**2)
-        r=r+(r==0)
-        tmp=self.dt*self.agent_size*self.R/r
-        tmp*=np.exp(-r/np.sqrt(self.D*self.tau/(1+self.V**2*self.tau/(4*self.D))))
-        tmp*=np.exp(self.dx*x*self.V/(2*self.D))
-        return (1-np.exp(-tmp))*(r>0)
-
-    def get_rate(self,x,y):
-        r=np.sqrt((self.dx*x)**2+(self.dy*y)**2)
-        tmp=np.divide(self.dt*self.agent_size*self.R, r, out=np.zeros_like(r), where=r!=0)
-        tmp*=np.exp(-r/np.sqrt(self.D*self.tau/(1+self.V**2*self.tau/(4*self.D))))
-        tmp*=np.exp(self.dx*x*self.V/(2*self.D))
-        return tmp
-
-    def transition_function(self,belief,action):
-        #NOT YET IMPLEMENTED
-        l=self.likelihood
-        b=np.roll(belief,tuple(action),axis=(0,1))
-        if np.array_equal(action,[1,0]):
-            b[-self.dims[0]+1,:]=0
-        if np.array_equal(action,[-1,0]):
-            b[self.dims[0]-1,:]=0
-        if np.array_equal(action,[0,1]):
-            b[:,-self.dims[1]+1]=0
-        if np.array_equal(action,[0,-1]):
-            b[:,self.dims[1]-1]=0
-        t1=l*b
-        t2=(1-l)*b
-        t2[0,0]=0
-        return [np.sum(t1),np.sum(t2)],[t1/np.sum(t1),t2/np.sum(t2)]
-
-    def get_g(self,alpha,action): #first element associated with detection, second non-detection
-        #r=self.transition(self.agent.true_pos,action)
-        #x=np.arange(r[0],r[0]-self.dims[0],-1)
-        #y=np.arange(r[1],r[1]-self.dims[1],-1)
-        #l=self.env.get_likelihood(x[:,None],y[None,:])
-        l=self.likelihood
-
-        g1=l*alpha
-        g2=(1-l)*alpha
-        out=np.array([g1,g2])
-        if (action==np.array([1,0])).all():
-            out1=np.roll(g1,-1,axis=0)
-            out2=np.roll(g2,-1,axis=0)
-            out1[-1,:]=out1[-2,:]
-            out2[-1,:]=out2[-2,:]
-            out1[self.x0,self.y0]=0
-            out2[self.x0,self.y0]=0
-            return [out1,out2]
-        elif (action==np.array([-1,0])).all():
-            out1=np.roll(g1,1,axis=0)
-            out2=np.roll(g2,1,axis=0)
-            out1[0,:]=out1[1,:]
-            out1[0,:]=out2[1,:]
-            out1[self.x0,self.y0]=0
-            out2[self.x0,self.y0]=0
-            return [out1,out2]
-        elif (action==np.array([0,1])).all():
-            out1=np.roll(g1,-1,axis=1)
-            out2=np.roll(g2,-1,axis=1)
-            out1[:,-1]=out1[:,-2]
-            out2[:,-1]=out2[:,-2]
-            out1[self.x0,self.y0]=0
-            out2[self.x0,self.y0]=0
-            return [out1,out2]
-        elif (action==np.array([0,-1])).all():
-            out1=np.roll(g1,1,axis=1)
-            out2=np.roll(g2,1,axis=1)
-            out1[:,0]=out1[:,1]
-            out2[:,0]=out2[:,1]
-            out1[self.x0,self.y0]=0
-            out2[self.x0,self.y0]=0
-            return [out1,out2]
-        g2[self.x0,self.y0]=0
-        return [g1,g2]
-
-    def getObs(self,pos):
-        l=self.get_likelihood(pos[0]-self.x0,pos[1]-self.y0)
-        x=random.random()
-        #print(x,l)
-        return x
-
-    def transition(self,pos,action):
-        tmp=pos+action
-        if not self.outOfBounds(tmp):
-            return tmp # agent is unmoved if attempts to leave simulation bounds
-        return pos
-
-    def outOfBounds(self,pos):
-        if (pos[0]<0 or pos[0]>self.dims[0]-1 or pos[1] < 0 or pos[1] > self.dims[1]-1):
-            return True
-        return False
-
-    def getReward(self,true_pos,action):
-        r=true_pos-self.pos
-        # if (action==np.array([0,0])).all():
-        #     return self.rewards[0][r[0],r[1]]
-        if (action==np.array([1,0])).all():
-            return self.rewards[0][r[0],r[1]]
-        elif (action==np.array([-1,0])).all():
-            return self.rewards[1][r[0],r[1]]
-        elif (action==np.array([0,1])).all():
-            return self.rewards[2][r[0],r[1]]
-        elif (action==np.array([0,-1])).all():
-            return self.rewards[3][r[0],r[1]]
-
-
-class SimpleEnv2D:
-    def __init__(self,params):
-        self.seed=datetime.now()
-        random.seed(self.seed)
-        self.t=0
-        self.dims=params["dims"] # number of (x,y) gridpoints. Ny should be odd
-        self.Lx=params["Lx"] #downwind box size
-        self.Ly=params["Ly"] #crosswind box size
-        self.dx=self.Lx/(self.dims[0]-1)
-        self.dy=self.Ly/(self.dims[1]-1)
-        self.x0=params["x0"] #integer downwind position of source relative to lefthand boundary
-        self.xarr=np.linspace(0,self.Lx,self.dims[0])
-        self.yarr=np.linspace(0,self.Ly,self.dims[1])
-        self.D=params["D"] #turbulent diffusivity
-        self.agent_size=params["agent_size"]
-        self.tau=params["tau"] #particle lifetime
-        self.V=params["V"] #mean flow speed
-        self.R=params["R"] #emission rate
-        self.dt=params["dt"] #time step
-        self.actions=[np.array([-1,0]),np.array([1,0]),np.array([0,-1]),np.array([0,1])]
-        self.numobs=params['max_detections']+2
-        self.obs=[i for i in range(-1,params['max_detections']+1)]
-        self.gamma=params["gamma"] #discount rate
-        self.numactions=4
-        penalty=params["exit_penalty"]
-        self.easy_likelihood=params["easy_likelihood"]
-        self.Uoverv=params["Uoverv"]
-        self.agent=None
-        self.y0=params['y0']
-        self.pos=np.array([self.x0,self.y0])
-        time_reward=params['time_reward']
-        self.shaped=False
-        if "2d" in params:
-            self.twod=params["2d"]
-        else:
-            self.twod=False
-        #if self.twod:
-        #    import scipy.special.cython_special as spec
-        self.shaping_factor=params["shaping_factor"]
-        if self.shaping_factor=="q":
-            self.shaped=True
-        elif self.shaping_factor>0:
-            self.shaped=True
-        self.shaping_power=params["shaping_power"]
-        self.entropy_factor=params["entropy_factor"]
-        if self.entropy_factor>0:
-            self.shaped=True
-
-
-
-        dist=np.zeros((2*self.dims[0]-1,2*self.dims[1]-1))
-        for i in range(-(self.dims[0]-1),self.dims[0]):
-            for j in range(-(self.dims[1]-1),self.dims[1]):
-                dist[i,j]=np.abs(i)+np.abs(j)
-        #if time_reward:
-        #    self.qvalue=-dist
-        #else:
-        #    self.qvalue=self.gamma**dist
-
-        self.dist=dist
-        self.likelihood=[]
-        x=np.arange(-self.dims[0]+1,self.dims[0])
-        y=np.arange(-self.dims[1]+1,self.dims[1])
-        x=x[:,None]
-        y=y[None,:]
-        for i in range(self.obs[-1]+1):
-            l=self.compute_likelihood(x,y,i)
-            assert(l[self.dims[0]-1,self.dims[1]-1]==0)
-            self.likelihood.append(l)
-
-
-        # need to compute likelihood function on all r1-r2 within simulation box. order is r-r0
-        #self.likelihood=np.zeros((2*self.dims[0]-1,2*self.dims[1]-1))
-        #for i in range(-(self.dims[0]-1),self.dims[0]):
-        #        for j in range(-(self.dims[1]-1),self.dims[1]):
-                    #self.likelihood[i,j]=1/np.cosh(np.abs(self.yarr[j])/self.xarr[i]/self.intens)**2*sc.exp1(self.intens**2*self.xarr[i]**2/self.c0)
-        #            r=np.sqrt((self.dx*i)**2+(self.dy*j)**2)
-         #           if r!=0:
-          #              self.likelihood[i,j]=self.get_likelihood(i,j)
-                        #tmp=self.dt*self.agent_size*self.R/r
-                        #tmp*=np.exp(-r/np.sqrt(self.D*self.tau/(1+self.V**2*self.tau/(4*self.D))))
-                        #tmp*=np.exp(self.dx*i*self.V/(2*self.D))
-                        #self.likelihood[i,j]=1-np.exp(-tmp)
-           #         else:
-            #            self.likelihood[i,j]=0 # critical: likelihood of being at source is zero (unless the mosquito found it)
-
-        #if self.easy_likelihood:
-         #   self.likelihood=np.zeros((2*self.dims[0]-1,2*self.dims[1]-1))
-          #  for i in range(-(self.dims[0]-1),self.dims[0]):
-           #     for j in range(-(self.dims[1]-1),self.dims[1]):
-            #        if i>0:
-             #           self.likelihood[i,j]=1/np.cosh(self.dy*j*self.Uoverv/(self.dx*i))**2
-        shaping=np.zeros((self.numactions,2*self.dims[0]-1,2*self.dims[1]-1))
-        shapefunc=None
-        if self.shaped:
-            if self.shaping_factor=="q":
-                shapefunc=1/self.gamma-self.gamma**(self.dist-1)
-            elif self.shaping_power==0:
-                shapefunc=np.log(1+self.dist)
-            else:
-                shapefunc=self.shaping_factor*self.dist**self.shaping_power
-            if self.entropy_factor>0:
-                shapefunc=shapefunc+self.entropy_factor*(self.likelihood*np.log(self.likelihood,out=np.zeros_like(self.likelihood),where=self.likelihood!=0)+(1-self.likelihood)*np.log(1-self.likelihood,out=np.zeros_like(self.likelihood),where=self.likelihood!=1))
-        self.shapefunc=shapefunc
-
-        if self.shaped:
-            for a in range(self.numactions):
-                action=self.actions[a]
-                shaping[a,:,:]=self.gamma*np.roll(shapefunc,tuple(-action),axis=(0,1))
-                shaping[a,0,0]=self.gamma*shapefunc[0,0]
-            shaping=shapefunc[None,:,:]-shaping
-        self.shaping=shaping
-
-        if not time_reward:
-            self.reward0=np.zeros((2*self.dims[0]-1,2*self.dims[1]-1))
-            self.reward1=np.zeros((2*self.dims[0]-1,2*self.dims[1]-1))
-            self.reward2=np.zeros((2*self.dims[0]-1,2*self.dims[1]-1))
-            self.reward3=np.zeros((2*self.dims[0]-1,2*self.dims[1]-1))
-            self.reward4=np.zeros((2*self.dims[0]-1,2*self.dims[1]-1))
-            #reward0[self.x0,self.y0]=100
-            # if self.x0>0:
-            #     reward1[self.x0-1,self.y0]=1
-            # reward2[self.x0+1,self.y0]=1
-            # reward3[self.x0,self.y0-1]=1
-            # reward4[self.x0,self.y0+1]=1
-            # reward1[-1,:]=-r #penalize leaving the area
-            # reward2[0,:]=-r
-            # reward3[:,-1]=-r
-            # reward4[:,0]=-r
-            # self.rewards=[reward0,reward1,reward2,reward3,reward4]
-
-            self.reward1[1,0]=1
-            self.reward2[-1,0]=1
-            self.reward3[0,1]=1
-            self.reward4[0,-1]=1
-
-            self.reward0[self.dims[0]-self.x0:self.dims[0],:]=-penalty
-            self.reward1[self.dims[0]-1-self.x0:self.dims[0],:]=-penalty
-
-            self.reward0[-(self.dims[0]):-self.x0,:]=-penalty
-            self.reward2[-(self.dims[0]-1):-self.x0+1,:]=-penalty
-
-            self.reward0[:,self.dims[1]-self.y0:self.dims[1]]=-penalty
-            self.reward3[:,self.dims[1]-self.y0-1:self.dims[1]]=-penalty
-
-            self.reward0[:,-(self.dims[1]):-self.y0]=-penalty
-            self.reward4[:,-(self.dims[1]-1):-self.y0+1]=-penalty
-            self.rewards=[self.reward1+shaping[0,:,:],self.reward2+shaping[1,:,:],self.reward3+shaping[2,:,:],self.reward4+shaping[3,:,:]]
-        else:
-            rew=-1*np.ones((2*self.dims[0]-1,2*self.dims[1]-1))
-            rew[0,0]=0
-            self.rewards=[rew,rew,rew,rew,rew]
-
-    def change_shaping_factor(self,new_factor,vf):
-        shaping=np.zeros((self.numactions,2*self.dims[0]-1,2*self.dims[1]-1))
-        vf.shift_value((new_factor-self.shaping_factor)*self.shapefunc)
-        self.shaping_factor=new_factor
-        for a in range(self.numactions):
-            action=self.actions[a]
-            tmp0=np.roll(self.likelihood*self.shapefunc,tuple(-action),axis=(0,1))
-            tmp0[-action[0],-action[1]]=0
-            tmp0[0,0]=0
-            p=1-self.likelihood
-            p[0,0]=0
-            tmp1=np.roll(p*self.shapefunc,tuple(-action),axis=(0,1))
-            tmp1[-action[0],-action[1]]=0
-            tmp1[0,0]=0
-            shaping[a,:,:]=self.gamma*(tmp0+tmp1)
-        shaping=self.shapefunc[None,:,:]-shaping
-        shaping=shaping*self.shaping_factor
-        self.rewards=[self.reward1+shaping[0,:,:],self.reward2+shaping[1,:,:],self.reward3+shaping[2,:,:],self.reward4+shaping[3,:,:]]
-
-
-    def stepInTime(self):
-        self.t+=1
-
-    def reset(self):
-        self.t=0
-
-    def set_pos(self,x0,y0):
-        self.x0=x0
-        self.y0=y0
-        #self.likelihood=[]
-        #x=np.arange(-self.dims[0]+1,self.dims[0])
-        #y=np.arange(-self.dims[1]+1,self.dims[1])
-        #x=x[:,None]
-        #y=y[None,:]
-        #for i in range(self.obs[-1]+1):
-        #    l=self.compute_likelihood(x,y,i)
-        #    assert(l[self.dims[0]-1,self.dims[1]-1]==0)
-        #    self.likelihood.append(l)
-
-    def set_agent(self,agent):
-        self.agent=agent
-
-
-    def get_likelihood(self,x,y,n):
-        return self.likelihood[n][x+self.dims[0]-1,y+self.dims[1]-1]
-
-    def compute_likelihood(self,x,y,n):
-        if self.twod:
-            r=np.sqrt((self.dx*x)**2+(self.dy*y)**2)
-            r1=r+(r==0)
-            ell=np.sqrt(self.D*self.tau/(1+self.V**2*self.tau/(4*self.D)))
-            tmp=sc.kn(0,r1/ell)
-            tmp*=self.R*self.dt/np.log(ell/self.agent_size)*np.exp(self.dx*x*self.V/2/self.D)
-            if n==self.obs[-1]:
-                out =0
-                for i in range(self.obs[-1]):
-                    out=out+np.exp(-tmp)*tmp**i/math.factorial(i)
-                return (1-out)*(r>0)
-            else:
-                return np.exp(-tmp)*tmp**n/math.factorial(n)*(r>0)
-        if self.easy_likelihood:
-            if isinstance(x,int):
-                x=np.array([x],dtype='float64')
-                y=np.array([y],dtype='float64')
-            else:
-                x=x.astype('float64')
-                y=y.astype('float64')
-            return 1/np.cosh(self.dy*self.Uoverv/self.dx*y*np.divide(np.ones_like(x),x,out=np.zeros_like(x),where=x!=0))**2*(x>0)
-        r=np.sqrt((self.dx*x)**2+(self.dy*y)**2)
-        r1=r+(r==0)
-        tmp=self.dt*self.agent_size*self.R/r1
-        tmp*=np.exp(-r1/np.sqrt(self.D*self.tau/(1+self.V**2*self.tau/(4*self.D))))
-        tmp*=np.exp(self.dx*x*self.V/(2*self.D))
-        if n==self.obs[-1]:
-            out=0
-            for i in range(self.obs[-1]):
-                out=out+np.exp(-tmp)*tmp**i/math.factorial(i)
-            return (1-out)*(r>0)
-        else:
-            return np.exp(-tmp)*tmp**n/math.factorial(n)*(r>0)
-
-    def get_rate(self,x,y):
-        if self.twod:
-            r=np.sqrt((self.dx*x)**2+(self.dy*y)**2)
-            r1=r+(r==0)
-            ell=np.sqrt(self.D*self.tau/(1+self.V**2*self.tau/(4*self.D)))
-            tmp=sc.kn(0,r1/ell)
-            tmp*=self.R/np.log(ell/self.agent_size)*np.exp(self.dx*x*self.V/2/self.D)
-            return tmp*(r>0)
-
-        r=np.sqrt((self.dx*x)**2+(self.dy*y)**2)
-        tmp=np.divide(self.dt*self.agent_size*self.R, r, out=np.zeros_like(r), where=r!=0)
-        tmp*=np.exp(-r/np.sqrt(self.D*self.tau/(1+self.V**2*self.tau/(4*self.D))))
-        tmp*=np.exp(self.dx*x*self.V/(2*self.D))
-        return tmp
-
-    def transition_function(self,belief,action):
-        b=np.roll(belief,tuple(action),axis=(0,1))
-        if np.array_equal(action,[1,0]):
-            tsrc=belief[0,0]+belief[-1,0]
-        elif np.array_equal(action,[-1,0]):
-            tsrc=belief[0,0]+belief[1,0]
-        elif np.array_equal(action,[0,1]):
-            tsrc=belief[0,0]+belief[0,-1]
-        elif np.array_equal(action,[0,-1]):
-            tsrc=belief[0,0]+belief[0,1]
-        else:
-            raise RuntimeError("not a valid action")
-        tsrc_out=np.zeros_like(b)
-        tsrc_out[0,0]=1
-
-        ps=[]
-        taus=[]
-        ps.append(tsrc)
-        taus.append(tsrc_out)
-
-        for obs in range(self.numobs-1):
-            tmp=np.roll(self.likelihood[obs],(self.dims[0],self.dims[1]),axis=(0,1))*b
-            tmp[0,0]=0
-            ps.append(np.sum(tmp))
-            taus.append(tmp/np.sum(tmp))
-        return ps,taus
-
-    def get_g(self,alpha,action): #first element associated with detection, second non-detection
-        out=[]
-        g_src=np.zeros_like(alpha)
-        g_src[0,0]=alpha[0,0]
-        g_src[-action[0],-action[1]]=alpha[0,0]
-        out.append(g_src)
-        for obs in range(self.numobs-1):
-            g=alpha*np.roll(self.likelihood[obs],(self.dims[0],self.dims[1]),axis=(0,1))
-            g=np.roll(g,tuple(-action),axis=(0,1))
-            g[0,0]=0
-            g[-action[0],-action[1]]=0
-            out.append(g.copy())
-        return out
-
-    def getObs(self,pos):
-        n=np.random.poisson(self.get_rate(pos[0]-self.x0,pos[1]-self.y0))
-        if n>self.obs[-1]:
-            n=self.obs[-1]
-        #print(x,l)
-        return n
-
-    def transition(self,pos,action):
-        tmp=pos+action
-        if not self.outOfBounds(tmp):
-            return tmp # agent is unmoved if attempts to leave simulation bounds
-        return pos
-
-    def outOfBounds(self,pos):
-        if (pos[0]<0 or pos[0]>self.dims[0]-1 or pos[1] < 0 or pos[1] > self.dims[1]-1):
-            return True
-        return False
-
-    def getReward(self,true_pos,action):
-        r=true_pos-self.pos
-        # if (action==np.array([0,0])).all():
-        #     return self.rewards[0][r[0],r[1]]
-        if (action==np.array([1,0])).all():
-            return self.rewards[0][r[0],r[1]]
-        elif (action==np.array([-1,0])).all():
-            return self.rewards[1][r[0],r[1]]
-        elif (action==np.array([0,1])).all():
-            return self.rewards[2][r[0],r[1]]
-        elif (action==np.array([0,-1])).all():
-            return self.rewards[3][r[0],r[1]]
 
 class DNSEnv2D(SimpleEnv2D):
     def __init__(self,params):
