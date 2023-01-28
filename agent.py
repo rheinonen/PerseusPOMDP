@@ -82,179 +82,7 @@ class Agent:
 
     def set_policy(self,p):
         self.policy=p
-
-class DiscriminationAgent(Agent):
-    def __init__(self,e,r0,p=None,belief_env=None):
-        self.env=e
-        self.policy=p
-        self.true_pos=r0
-        self.dims=(2,)+e.dims
-        self.belief=np.ones(self.dims)
-        self.belief=self.belief/np.sum(self.belief)
-        self.last_action=None
-        self.rewards=[]
-        self.last_reward=None
-        self.last_obs=None
-        self.nhits=0
-        self.ob=False
-        if belief_env is not None:
-            self.belief_env=belief_env #if the agent's model doesn't match the true model
-        else:
-            self.belief_env = e
-    def stepInTime(self):
-        b=self.perseus_belief(self.belief)
-        action=self.policy.getAction(self.belief)
-        # if self.env.outOfBounds(action+self.true_pos):
-        #     self.ob=True
-        # else:
-        #     self.ob=False
-        self.belief=self.transportBelief(self.belief,action)
-        self.last_reward=self.env.getReward(self.true_pos,action)
-        self.rewards.append(self.last_reward)
-        self.true_pos=self.env.transition(self.true_pos,action)
-        obs=self.env.getObs(self.true_pos)
-        self.updateBelief(obs)
-        self.last_action=action
-        self.last_obs=obs
-        return b
-
-    def reset(self,r0,b=None):
-        super().reset(r0,b)
-        self.nhits=0
-
-    def updateBelief(self,obs):
-        if obs==True:
-            self.nhits+=1
-        self.belief=self.computeBelief(obs,self.belief)
-
-    def computeBelief(self,obs,belief,action="null"):
-        if obs=="source":
-            b=np.zeros(self.dims)
-            b[0,0,0]=1
-            return b
-        out=belief.copy()
-        pos=self.true_pos+self.env.str_to_array(action)
-        x=np.arange(pos[0],pos[0]-self.dims[1],-1)
-        y=np.arange(pos[1],pos[1]-self.dims[2],-1)
-        l0=self.env.get_likelihood(x[:,None],y[None,:],sep=0)
-        l1=self.env.get_likelihood(x[:,None],y[None,:],sep=1)
-        l=np.stack([l0,l1],axis=0)
-        if obs==True:
-            out=out*l
-        else:
-            out=out*(1-l)
-        out[:,0,0]=0
-        if np.sum(out)==0:
-            raise RuntimeError('zero belief encountered at pos '+str(pos)+', time '+str(self.env.t))
-        out=out/np.sum(out)
-        return out
-
-    def transportBelief(self,belief,action):
-        return belief
-
-    def perseus_belief(self,belief):
-        dims=belief.shape
-        b=np.pad(belief,((0,0),(0,dims[1]-1),(0,dims[2]-1)))
-        b=np.flip(b)
-        b=np.roll(b,(1+self.true_pos[0],1+self.true_pos[1]),axis=(1,2))
-        return b
-
-
-
-class MosquitoAgentOriginal(Agent):
-    def __init__(self,e,r0,p=None,belief_env=None):
-        self.env=e
-        self.policy=p
-        self.true_pos=r0
-        self.dims=e.dims
-        self.belief=np.ones(self.dims)
-        self.belief=self.belief/np.sum(self.belief)
-        self.last_action=None
-        self.rewards=[]
-        self.last_reward=None
-        self.last_obs=None
-        self.nhits=0
-        self.ob=False
-        if belief_env is not None:
-            self.belief_env=belief_env #if the agent's model doesn't match the true model
-        else:
-            self.belief_env = e
-
-    def stepInTime(self):
-        b=self.perseus_belief(self.belief)
-        action=self.policy.getAction(self.belief)
-        if self.env.outOfBounds(action+self.true_pos):
-            self.ob=True
-        else:
-            self.ob=False
-        self.belief=self.transportBelief(self.belief,action)
-
-        self.last_reward=self.env.getReward(self.true_pos,action)
-        self.rewards.append(self.last_reward)
-        self.true_pos=self.env.transition(self.true_pos,action)
-        obs=self.env.getObs(self.true_pos)
-        self.updateBelief(obs)
-        self.last_action=action
-        self.last_obs=obs
-
-        return b
-
-    def reset(self,r0,b=None):
-        super().reset(r0,b)
-        self.nhits=0
-
-    def updateBelief(self,obs):
-        if obs==True:
-            self.nhits+=1
-        self.belief=self.computeBelief(obs,self.belief)
-
-    def computeBelief(self,obs,belief):
-        #transport belief
-        # if action is None:
-        #     action=np.array([0,0])
-        # out=self.transportBelief(belief,action)
-        #bayesian update
-        out=belief.copy()
-        l=self.belief_env.likelihood
-        if obs==True:
-            out=out*l
-        else:
-            out=out*(1-l)
-        out[self.env.x0,self.env.y0]=0
-        if np.sum(out)==0:
-            raise RuntimeError('zero belief encountered at pos '+str(pos)+', time '+str(self.env.t))
-        out=out/np.sum(out)
-        return out
-
-    def transportBelief(self,belief,action):
-        out=belief.copy()
-        if self.ob==True:
-            return out #belief not transported if agent tried to leave the simulation box
-
-        if (action==np.array([1,0])).all():
-            tmp=np.array(out[-1,:])
-            out[1:,:]=out[:-1,:]
-            out[0,:]=0
-            out[-1,:]+=tmp
-        elif (action==np.array([-1,0])).all():
-            tmp=np.array(out[0,:])
-            out[:-1,:]=out[1:,:]
-            out[-1,:]=0
-            out[0,:]+=tmp
-        elif (action==np.array([0,1])).all():
-            tmp=np.array(out[:,-1])
-            out[:,1:]=out[:,:-1]
-            out[:,0]=0
-            out[:,-1]+=tmp
-        elif (action==np.array([0,-1])).all():
-            tmp=np.array(belief[:,0])
-            out[:,:-1]=out[:,1:]
-            out[:,-1]=0
-            out[:,0]+=tmp
-        return out/np.sum(out)
-    def perseus_belief(self,belief):
-        return belief
-
+        
 class MosquitoAgent(Agent):
     def __init__(self,e,r0,p=None,belief_env=None):
         super().__init__(e,r0,p)
@@ -349,6 +177,82 @@ class MosquitoAgent(Agent):
         b=np.pad(belief,((0,dims[0]-1),(0,dims[1]-1)))
         b=np.flip(b)
         b=np.roll(b,(1+self.true_pos[0],1+self.true_pos[1]),axis=(0,1))
+        return b
+
+class DiscriminationAgent(Agent):
+    def __init__(self,e,r0,p=None,belief_env=None):
+        self.env=e
+        self.policy=p
+        self.true_pos=r0
+        self.dims=(2,)+e.dims
+        self.belief=np.ones(self.dims)
+        self.belief=self.belief/np.sum(self.belief)
+        self.last_action=None
+        self.rewards=[]
+        self.last_reward=None
+        self.last_obs=None
+        self.nhits=0
+        self.ob=False
+        if belief_env is not None:
+            self.belief_env=belief_env #if the agent's model doesn't match the true model
+        else:
+            self.belief_env = e
+    def stepInTime(self):
+        b=self.perseus_belief(self.belief)
+        action=self.policy.getAction(self.belief)
+        # if self.env.outOfBounds(action+self.true_pos):
+        #     self.ob=True
+        # else:
+        #     self.ob=False
+        self.belief=self.transportBelief(self.belief,action)
+        self.last_reward=self.env.getReward(self.true_pos,action)
+        self.rewards.append(self.last_reward)
+        self.true_pos=self.env.transition(self.true_pos,action)
+        obs=self.env.getObs(self.true_pos)
+        self.updateBelief(obs)
+        self.last_action=action
+        self.last_obs=obs
+        return b
+
+    def reset(self,r0,b=None):
+        super().reset(r0,b)
+        self.nhits=0
+
+    def updateBelief(self,obs):
+        if obs==True:
+            self.nhits+=1
+        self.belief=self.computeBelief(obs,self.belief)
+
+    def computeBelief(self,obs,belief,action="null"):
+        if obs=="source":
+            b=np.zeros(self.dims)
+            b[0,0,0]=1
+            return b
+        out=belief.copy()
+        pos=self.true_pos+self.env.str_to_array(action)
+        x=np.arange(pos[0],pos[0]-self.dims[1],-1)
+        y=np.arange(pos[1],pos[1]-self.dims[2],-1)
+        l0=self.env.get_likelihood(x[:,None],y[None,:],sep=0)
+        l1=self.env.get_likelihood(x[:,None],y[None,:],sep=1)
+        l=np.stack([l0,l1],axis=0)
+        if obs==True:
+            out=out*l
+        else:
+            out=out*(1-l)
+        out[:,0,0]=0
+        if np.sum(out)==0:
+            raise RuntimeError('zero belief encountered at pos '+str(pos)+', time '+str(self.env.t))
+        out=out/np.sum(out)
+        return out
+
+    def transportBelief(self,belief,action):
+        return belief
+
+    def perseus_belief(self,belief):
+        dims=belief.shape
+        b=np.pad(belief,((0,0),(0,dims[1]-1),(0,dims[2]-1)))
+        b=np.flip(b)
+        b=np.roll(b,(1+self.true_pos[0],1+self.true_pos[1]),axis=(1,2))
         return b
 
 class CorrAgent(MosquitoAgent):
